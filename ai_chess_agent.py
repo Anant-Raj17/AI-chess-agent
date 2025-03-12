@@ -14,36 +14,30 @@ load_dotenv()
 # Get the API key from environment variables
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
-if "board" not in st.session_state:
-    st.session_state.board = chess.Board()
-if "made_move" not in st.session_state:
-    st.session_state.made_move = False
-if "board_svg" not in st.session_state:
-    st.session_state.board_svg = None
-if "move_history" not in st.session_state:
-    st.session_state.move_history = []
-if "move_logs" not in st.session_state:
-    st.session_state.move_logs = []
-if "game_status" not in st.session_state:
-    st.session_state.game_status = "Not started"
-if "is_game_over" not in st.session_state:
-    st.session_state.is_game_over = False
-if "game_in_progress" not in st.session_state:
-    st.session_state.game_in_progress = False
-if "current_move" not in st.session_state:
-    st.session_state.current_move = None
+# Function to initialize or get session state with a default value
+def get_session_state(key, default_value):
+    if key not in st.session_state:
+        st.session_state[key] = default_value
+    return st.session_state[key]
 
-# Setup page layout with columns
+# Initialize all session state variables at the beginning
+get_session_state("board", chess.Board())
+get_session_state("made_move", False)
+get_session_state("board_svg", None)
+get_session_state("game_status", "Not started")
+get_session_state("is_game_over", False)
+get_session_state("game_in_progress", False)
+get_session_state("current_move", None)
+get_session_state("game_paused", False)  # New state for pausing the game
+
+# Setup page layout
 st.set_page_config(layout="wide")
 
-# Create a two-column layout
-col1, col2 = st.columns([2, 1])
+# Create a single column layout
+col1 = st.container()
 
 with col1:
     st.title("AI Chess Game")
-
-with col2:
-    st.title("Move Log")
 
 # Sidebar configuration
 st.sidebar.title("Chess Agent Configuration")
@@ -51,7 +45,7 @@ st.sidebar.info("""
 This AI chess game plays automatically until completion.
 The AI controls both white and black pieces.
 The game will end when there's a checkmate, stalemate, or insufficient material.
-The move log shows all moves made during the game.
+You can pause, reset, or start a new game using the control buttons.
 """)
 
 def available_moves() -> str:
@@ -74,6 +68,12 @@ def execute_move(move: str) -> str:
         # Get current turn
         current_side = "White" if st.session_state.board.turn == chess.WHITE else "Black"
         
+        # Get algebraic notation before pushing the move
+        try:
+            algebraic = st.session_state.board.san(chess_move)
+        except:
+            algebraic = move
+        
         # Update board state
         st.session_state.board.push(chess_move)
         st.session_state.made_move = True
@@ -81,15 +81,16 @@ def execute_move(move: str) -> str:
         # Store the current move to highlight it on the board
         st.session_state.current_move = chess_move
 
-        # Track move count
-        move_number = len(st.session_state.move_logs) // 2 + 1
-        side_to_move = "White" if current_side == "White" else "Black"
+        # Track move count - use actual fullmove_number from the board
+        move_number = st.session_state.board.fullmove_number
+        if current_side == "Black":
+            move_number -= 1  # Adjust for black's move
         
         # Generate and store board visualization
         board_svg = chess.svg.board(st.session_state.board,
                                   arrows=[(chess_move.from_square, chess_move.to_square)],
                                   fill={chess_move.from_square: "gray"},
-                                  size=400)
+                                  size=300)
         st.session_state.board_svg = board_svg
 
         # Get piece information
@@ -101,10 +102,22 @@ def execute_move(move: str) -> str:
         # Generate move description
         from_square = chess.SQUARE_NAMES[chess_move.from_square]
         to_square = chess.SQUARE_NAMES[chess_move.to_square]
-        move_desc = f"Move {move_number}: {current_side} moved {piece_name} from {from_square} to {to_square}"
         
-        # Add move to logs
-        st.session_state.move_logs.append(move_desc)
+        # Check for special moves
+        special_move = ""
+        if chess_move.promotion:
+            promotion_piece = chess.piece_name(chess_move.promotion).capitalize()
+            special_move = f" (promoted to {promotion_piece})"
+        elif st.session_state.board.is_castling(chess_move):
+            if chess_move.to_square > chess_move.from_square:
+                special_move = " (Kingside Castle)"
+            else:
+                special_move = " (Queenside Castle)"
+        elif st.session_state.board.is_en_passant(chess_move):
+            special_move = " (en passant)"
+        
+        # Format move description with clear indicators for white and black
+        move_desc = f"Move {move_number}: {current_side} moved {piece_name} from {from_square} to {to_square}{special_move} [{algebraic}]"
         
         # Check game status
         status_message = ""
@@ -122,13 +135,15 @@ def execute_move(move: str) -> str:
             status_message = "Check!"
         
         if status_message:
-            st.session_state.move_logs.append(status_message)
             st.session_state.game_status = status_message
         
         # Log the time it took to process the move
         end_time = time.time()
         processing_time = end_time - start_time
         print(f"Move processed in {processing_time:.3f} seconds")
+        
+        # We don't call st.rerun() here to avoid nested reruns
+        # The calling function will handle the UI update
         
         return move_desc + (f". {status_message}" if status_message else "")
     except ValueError:
@@ -162,17 +177,17 @@ if GROQ_API_KEY:
         # Configure AutoGen to use Groq's API through the OpenAI compatibility layer
         agent_config_list = [
             {
-                "model": "llama-3.3-70b-versatile",
+                "model": "gemma-2-9b-it",
                 "api_key": GROQ_API_KEY,
                 "base_url": "https://api.groq.com/openai/v1",
                 "api_type": "openai",
-                "timeout": 1.0,  # 1-second timeout for API calls
+                "timeout": 30.0,  # Increase timeout for API calls
                 "max_tokens": 100  # Limit token generation for faster responses
             },
         ]
 
         # Define a wrapper for agent responses to handle timeouts
-        def response_with_timeout(agent, recipient, message, timeout=1.0):
+        def response_with_timeout(agent, recipient, message, timeout=5.0):
             """Call the agent with a timeout and fall back to a quick move if needed."""
             result = None
             
@@ -186,16 +201,21 @@ if GROQ_API_KEY:
             
             # Start thread to handle the AI response
             thread = threading.Thread(target=target)
+            thread.daemon = True  # Mark as daemon so it doesn't block program exit
             thread.start()
             thread.join(timeout)
             
-            # If we timed out, force a move
+            # If we timed out, force a move in the main thread
             if thread.is_alive():
                 print("Agent response timed out, making random move")
                 # If we're waiting for a move, make a random one
                 quick_move = make_quick_move()
                 if quick_move:
-                    execute_move(quick_move)
+                    try:
+                        move_result = execute_move(quick_move)
+                        print(f"Random move made: {move_result}")
+                    except Exception as e:
+                        print(f"Error making random move: {e}")
                 return None
             
             return result
@@ -294,6 +314,7 @@ if GROQ_API_KEY:
     - **Agent Black**: A LLaMA 3 70B powered chess player controlling black pieces
 
     The game will continue until checkmate, stalemate, or insufficient material.
+    You can pause the game at any time and resume when ready.
     """)
 
             # Create a placeholder for the chess board
@@ -301,10 +322,10 @@ if GROQ_API_KEY:
             
             # Display the initial board
             if st.session_state.board_svg:
-                board_placeholder.image(st.session_state.board_svg, caption="Current Board Position", use_column_width=True)
+                board_placeholder.image(st.session_state.board_svg, caption="Current Board Position", use_column_width=False)
             else:
-                initial_board_svg = chess.svg.board(st.session_state.board, size=400)
-                board_placeholder.image(initial_board_svg, caption="Current Board Position", use_column_width=True)
+                initial_board_svg = chess.svg.board(st.session_state.board, size=300)
+                board_placeholder.image(initial_board_svg, caption="Current Board Position", use_column_width=False)
 
             # Game status display
             status_placeholder = st.empty()
@@ -314,29 +335,65 @@ if GROQ_API_KEY:
                 else:
                     status_placeholder.info(st.session_state.game_status)
 
-            # Add the start game button
-            start_button = st.empty()
+            # Game control buttons
+            control_col1, control_col2, control_col3 = st.columns(3)
             
-            if not st.session_state.game_in_progress and not st.session_state.is_game_over:
-                if start_button.button("Start New Game"):
-                    # Reset game state
-                    st.session_state.board.reset()
-                    st.session_state.made_move = False
-                    st.session_state.move_logs = []
-                    st.session_state.board_svg = chess.svg.board(st.session_state.board, size=400)
-                    st.session_state.game_status = "Game in progress"
-                    st.session_state.is_game_over = False
-                    st.session_state.game_in_progress = True
-                    st.session_state.current_move = None
-                    
-                    # Update the status display
-                    status_placeholder.info("Game in progress - AIs are playing...")
-                    
-                    # Start a new thread for the game to avoid blocking the UI
-                    st.rerun()
+            # Start button
+            with control_col1:
+                if not st.session_state.game_in_progress:
+                    if st.button("Start New Game", key="start_game"):
+                        # Reset game state
+                        st.session_state.board = chess.Board()
+                        st.session_state.made_move = False
+                        st.session_state.board_svg = chess.svg.board(st.session_state.board, size=300)
+                        st.session_state.game_status = "Game in progress"
+                        st.session_state.is_game_over = False
+                        st.session_state.game_in_progress = True
+                        st.session_state.game_paused = False
+                        st.session_state.current_move = None
+                        
+                        # Update the status display
+                        status_placeholder.info("Game in progress - AIs are playing...")
+                        
+                        # Force a rerun to start the game
+                        st.rerun()
             
-            # If game is in progress but not over, continue the game
-            if st.session_state.game_in_progress and not st.session_state.is_game_over:
+            # Pause/Resume button
+            with control_col2:
+                if st.session_state.game_in_progress and not st.session_state.is_game_over:
+                    if st.session_state.game_paused:
+                        if st.button("Resume Game"):
+                            st.session_state.game_paused = False
+                            status_placeholder.info("Game resumed - AIs are playing...")
+                            st.rerun()
+                    else:
+                        if st.button("Pause Game"):
+                            st.session_state.game_paused = True
+                            status_placeholder.warning("Game paused")
+                            st.rerun()
+            
+            # Reset button
+            with control_col3:
+                if st.session_state.game_in_progress:
+                    if st.button("Reset Game"):
+                        # Reset game state
+                        st.session_state.board = chess.Board()
+                        st.session_state.made_move = False
+                        st.session_state.board_svg = chess.svg.board(st.session_state.board, size=300)
+                        st.session_state.game_status = "Not started"
+                        st.session_state.is_game_over = False
+                        st.session_state.game_in_progress = False
+                        st.session_state.game_paused = False
+                        st.session_state.current_move = None
+                        
+                        # Update the status display
+                        status_placeholder.info("Game reset. Click 'Start New Game' to begin.")
+                        
+                        # Force a rerun to reset the UI
+                        st.rerun()
+            
+            # If game is in progress but not over and not paused, continue the game
+            if st.session_state.game_in_progress and not st.session_state.is_game_over and not st.session_state.game_paused:
                 status_placeholder.info("Game in progress - AIs are playing...")
                 
                 try:
@@ -347,7 +404,7 @@ if GROQ_API_KEY:
                     game_start_time = time.time()
                     
                     # Main game loop - continue until game is over
-                    while not st.session_state.is_game_over:
+                    while not st.session_state.is_game_over and not st.session_state.game_paused:
                         # White's turn
                         if st.session_state.board.turn == chess.WHITE:
                             # Get white's move with timeout fallback
@@ -366,8 +423,9 @@ if GROQ_API_KEY:
                                 
                             # If we timed out and made a random move, the turn would have changed
                             if st.session_state.board.turn == chess.BLACK:
-                                # Update UI after each move
+                                # Update UI after white's move
                                 st.rerun()
+                                break  # Exit the loop to allow UI to refresh
                         
                         # Black's turn
                         else:
@@ -387,8 +445,9 @@ if GROQ_API_KEY:
                                 
                             # If we timed out and made a random move, the turn would have changed
                             if st.session_state.board.turn == chess.WHITE:
-                                # Update UI after each move
+                                # Update UI after black's move
                                 st.rerun()
+                                break  # Exit the loop to allow UI to refresh
                         
                         # If no progress was made (neither player moved), make a random move
                         if time.time() - game_start_time > 5.0 and not st.session_state.is_game_over:
@@ -404,57 +463,47 @@ if GROQ_API_KEY:
                             
                             # Update UI
                             st.rerun()
+                            break  # Exit the loop to allow UI to refresh
                     
-                    # Update game state after completion
-                    st.session_state.game_in_progress = False
-                    
-                    # Update the game status based on the final board state
-                    if st.session_state.board.is_checkmate():
-                        winner = 'White' if st.session_state.board.turn == chess.BLACK else 'Black'
-                        st.session_state.game_status = f"Checkmate! {winner} wins!"
-                    elif st.session_state.board.is_stalemate():
-                        st.session_state.game_status = "Game ended in stalemate!"
-                    elif st.session_state.board.is_insufficient_material():
-                        st.session_state.game_status = "Game ended - insufficient material to checkmate!"
-                    else:
-                        st.session_state.game_status = f"Game ended after {len(st.session_state.move_logs)} moves"
-                    
-                    # Refresh the UI
-                    st.rerun()
+                    # Update game state after completion if game is over
+                    if st.session_state.is_game_over:
+                        st.session_state.game_in_progress = False
+                        
+                        # Update the game status based on the final board state
+                        if st.session_state.board.is_checkmate():
+                            winner = 'White' if st.session_state.board.turn == chess.BLACK else 'Black'
+                            st.session_state.game_status = f"Checkmate! {winner} wins!"
+                        elif st.session_state.board.is_stalemate():
+                            st.session_state.game_status = "Game ended in stalemate!"
+                        elif st.session_state.board.is_insufficient_material():
+                            st.session_state.game_status = "Game ended - insufficient material to checkmate!"
+                        else:
+                            st.session_state.game_status = "Game ended"
+                        
+                        # Refresh the UI
+                        st.rerun()
                     
                 except Exception as game_error:
                     st.error(f"Game error: {str(game_error)}")
                     st.session_state.game_in_progress = False
             
-            # Reset button appears after the game is over
+            # Game over message
             if st.session_state.is_game_over:
                 status_placeholder.success(st.session_state.game_status)
-                if st.button("Start New Game"):
+                if st.button("Start New Game", key="restart_game"):
                     # Reset game state
-                    st.session_state.board.reset()
+                    st.session_state.board = chess.Board()  # Create a new board instead of resetting
                     st.session_state.made_move = False
-                    st.session_state.move_logs = []
-                    st.session_state.board_svg = chess.svg.board(st.session_state.board, size=400)
+                    st.session_state.board_svg = chess.svg.board(st.session_state.board, size=300)
                     st.session_state.game_status = "Game in progress"
                     st.session_state.is_game_over = False
                     st.session_state.game_in_progress = True
+                    st.session_state.game_paused = False
                     st.session_state.current_move = None
                     
                     # Refresh the UI
                     st.rerun()
                 
-        # Move log display in the second column
-        with col2:
-            log_placeholder = st.empty()
-            log_content = ""
-            
-            if st.session_state.move_logs:
-                for i, log in enumerate(st.session_state.move_logs):
-                    log_content += f"{i+1}. {log}\n"
-                log_placeholder.text_area("Game Moves", log_content, height=500, key="move_log")
-            else:
-                log_placeholder.info("No moves made yet. Start a new game to see the move log.")
-            
     except Exception as e:
         st.error(f"Error setting up the chess agents: {str(e)}")
 else:
